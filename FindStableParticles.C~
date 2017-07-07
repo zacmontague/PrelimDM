@@ -1,0 +1,228 @@
+//////////////////////////////////////////////////////////////////////////////
+///                  Delphes Tutorial w/ Branching Ratio                   ///
+///                  Zachary Montague 27.06.17                             ///
+///                                                                        ///
+///  This takes a Madgraph, Pythia, Delphes simulated pp to ttbar          ///
+///  and analyzes the branching ratios of the fully hadronic,              ///
+///  semi-leptonic, and fully leptonic decays.                             ///
+///  PYTHIA Status codes:                                                  ///
+///  http://home.thep.lu.se/~torbjorn/pythia81html/ParticleProperties.html ///
+///  PDG PID:                                                              ///
+///  http://pdg.lbl.gov/2007/reviews/montecarlorpp.pdf                     ///
+/////////////////////////////////////////////////////////////////////////////
+
+#ifdef __CLING__
+R__LOAD_LIBRARY(libDelphes)
+#include "classes/DelphesClasses.h"
+#include "external/ExRootAnalysis/ExRootTreeReader.h"
+#endif
+
+#include <iostream>
+#include <cmath>
+#include <cstdio>
+#include <vector>
+#include <map>
+
+#include <TSystem.h>
+#include <TH1D.h>
+#include <TChain.h>
+#include <TString.h>
+#include <TLorentzVector.h>
+
+struct TruthParticle{
+  GenParticle* particle;
+  int index;
+};
+
+//  Declare histogram array.
+TH1D* histogramArray[] = {};
+
+//  Delcare save directory.
+TString saveDirectory = "~/Work/PrelimDM/";
+
+void printParticleInfo(GenParticle* particle, Int_t index) {
+  printf("\n %3d %6d %4d %4d %4d %5d %6d %6d %3d",
+	 index, particle -> PID, particle -> Status, particle -> IsPU, particle -> M1, particle -> M2,
+	 particle -> D1, particle -> D2, particle -> Charge);
+  printf("%9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %9.2f %7.2f %7.2f %7.2f %7.2f %7.2f",
+	 particle -> Mass,
+	 particle -> E,particle -> Px, particle -> Py, particle -> Pz,
+	 particle -> P, particle -> PT, particle -> Eta, particle -> Phi,
+	 particle -> Rapidity, particle -> CtgTheta,
+	 particle -> D0, particle -> DZ,
+	 particle -> T, particle -> X, particle -> Y, particle -> Z);
+}
+
+bool isEmptyBranch(TClonesArray* branch) {
+  return branch -> GetEntries() == 0;
+}
+
+bool isZPrimeBoson(GenParticle* particle) {
+  return abs(particle -> PID) == 101;
+}
+
+bool isPhoton(GenParticle* particle) {
+  return particle -> PID == 22;
+}
+
+bool hasDaughter(GenParticle* particle) {
+  return particle -> D1 != -1;
+}
+
+bool hasDaughters(GenParticle* particle) {
+  return (particle -> D2 != -1) && (particle -> D1 != particle -> D2);
+}
+
+bool isStable(GenParticle* particle) {
+  return particle -> Status == 1;
+}
+
+bool areDaughtersStable(std::vector<TruthParticle> vectorDaughters) {
+  for (auto daughter : vectorDaughters) {
+    if (!isStable(daughter.particle)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void printFourMomentum(TLorentzVector fourMomentum) {
+  std::cout << "Px: " << fourMomentum(0) << "\tPy: " << fourMomentum(1) << "\tPz: " << fourMomentum(2) << "\tE: " << fourMomentum(3) << std::endl;
+}
+
+void printStableDaughters(std::vector<TruthParticle> stableDaughters) {
+  TLorentzVector fourMomentum(0, 0, 0, 0);
+  for (unsigned int i = 0; i < stableDaughters.size(); ++i) {
+    TruthParticle daughter = stableDaughters[i];
+    std::cout << "Particle index: " << daughter.index << "\t PID: " << daughter.particle -> PID << "\t Status: " << daughter.particle -> Status << "\t Charge: " << daughter.particle -> Charge << "\t vector index: " << i << std::endl;;
+    fourMomentum = fourMomentum + TLorentzVector(daughter.particle -> Px, daughter.particle -> Py, daughter.particle -> Pz, daughter.particle -> E);
+  }
+
+  printFourMomentum(fourMomentum);
+}
+
+std::vector<TruthParticle> getNextGeneration(TClonesArray* branchParticle, TruthParticle mother) {
+  std::vector<TruthParticle> generation;
+
+  int dauIndex1 = mother.particle -> D1;
+  int dauIndex2 = mother.particle -> D2;
+
+
+  GenParticle* daughterParticle1 = (GenParticle*) branchParticle -> At(dauIndex1);
+  std::cout << "Daughter at " << dauIndex1 << " added" << std::endl;
+  if (isPhoton(daughterParticle1)) {
+    std::cout << "Izzzz a photon! buh-bye" << std::endl;
+    return {};
+  }
+
+  generation.push_back({daughterParticle1, dauIndex1});
+
+  if (hasDaughters(mother.particle)) {
+    for (int j = dauIndex1 + 1; j <= dauIndex2; ++j) {
+      GenParticle* potentialDaughter = (GenParticle*) branchParticle -> At(j);
+      if (potentialDaughter -> M1 == daughterParticle1 -> M1) {
+	generation.push_back({potentialDaughter, j});
+	std::cout << "Daughter at " << j << " added" << std::endl;
+      }
+    }
+  }
+  return generation;
+}
+
+std::vector<TruthParticle> getDaughters(TClonesArray* branchParticle, GenParticle* quark, int quark_key) {
+  //  std::map<int, GenParticle*> mapDaughters= {{quark_key, quark}};
+  std::vector<TruthParticle> vectorDaughters = {{quark, quark_key}};
+  int i = 0;
+  int counter = 0;
+  std::cout << "BEGINNING ENERGY! " << quark -> E << std::endl << std::endl;
+  
+  while (!areDaughtersStable(vectorDaughters)) {
+    std::cout << "Particle being probed: " << vectorDaughters[i].index << std::endl;
+    
+    if (hasDaughter(vectorDaughters[i].particle)) {
+      std::vector<TruthParticle> nextGeneration = getNextGeneration(branchParticle, vectorDaughters[i]);
+      vectorDaughters.insert(vectorDaughters.end(), nextGeneration.begin(), nextGeneration.end());
+      std::cout << "Entry being deleted! " << (vectorDaughters.begin() + i) -> index << std::endl << std::endl;
+      vectorDaughters.erase(vectorDaughters.begin() + i);
+      counter++;
+      
+      
+    
+    }
+    else {
+      std::cout << "Particle " << vectorDaughters[i].index << " is stable! " << "\t Status: " << vectorDaughters[i].particle -> Status << std::endl << std::endl;
+      i++;
+    }
+  }
+  std::sort(vectorDaughters.begin(), vectorDaughters.end(), [](TruthParticle a, TruthParticle b) {
+      return a.index < b.index;
+    });
+
+  auto it = std::unique(vectorDaughters.begin(), vectorDaughters.end(), [](TruthParticle a, TruthParticle b) {
+      return a.index == b.index;
+    });
+  
+  vectorDaughters.erase(it, vectorDaughters.end());
+  printStableDaughters(vectorDaughters);
+
+  std::cout << "\nPx: " << quark -> Px << "\tPy: " << quark -> Py << "\tPz: " << quark -> Pz << "\tE: " << quark -> E << std::endl;
+
+  return {};
+}
+
+void saveHistograms() {
+  TCanvas* c = new TCanvas("c", "c");
+  for (auto histogram : histogramArray) {
+    histogram -> Draw();
+    c -> SaveAs(saveDirectory + histogram -> GetName() + ".png");
+  }
+}
+
+//  Main function.
+void FindStableParticles(const char *inputFile) {
+  gSystem -> Load("libDelphes");
+  
+  //  Create chain of ROOT trees.
+  TChain chain("Delphes");
+  chain.Add(inputFile);
+
+  //  Create object of class ExRootTreeReader.
+  ExRootTreeReader* treeReader = new ExRootTreeReader(&chain);
+  Long64_t numberOfEntries = treeReader -> GetEntries();
+  
+  //  Get pointers to branches used in this analysis.
+  TClonesArray* branchParticle = treeReader -> UseBranch("Particle");
+
+  //  Bool to enable printing of particle info.
+  bool printParticle(0);
+  
+  if (printParticle) {
+    
+    printf("\n \n %6s %3s %4s %1s %3s %4s %6s %6s %6s",
+	   "Index", "PID", "Status", "IsPU", "M1", "M2", "D1", "D2", "Charge");
+    printf("%6s %7s %9s %10s %8s %10s %9s %8s %10s %9s %12s %6s %7s %6s %7s %7s %7s",
+	   "Mass", "E", "Px", "Py", "Pz", "P", "PT", "Eta", "Phi", "Rapid", "CtgTheta",
+	   "D0", "DZ", "T", "X", "Y", "Z");
+  std:cout << "\n--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n";
+  }
+
+  numberOfEntries = 1;
+  for(Int_t entry = 0; entry < numberOfEntries; ++entry) {
+    treeReader -> ReadEntry(entry);
+
+    //  Look in Particle branch.
+    if (!isEmptyBranch(branchParticle)) {     
+      for (Int_t i = 0; i < branchParticle -> GetEntries(); ++i) {
+	GenParticle *particle = (GenParticle*) branchParticle -> At(i);
+	if (isZPrimeBoson(particle) && particle -> Status > 50) {
+	  GenParticle* daughterQuark1 = (GenParticle*) branchParticle -> At(particle -> D1);
+	  std::vector<TruthParticle> stablDaughters1 = getDaughters(branchParticle, daughterQuark1, particle -> D1);
+	  GenParticle* daughterQuark2 = (GenParticle*) branchParticle -> At(particle -> D2);
+	  //getStableParticles(daughterQuark2);
+
+	}
+      }
+    }
+  }
+}
+
